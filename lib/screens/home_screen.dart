@@ -35,6 +35,11 @@ class _HomeScreenState extends State<HomeScreen> {
   DateTime? _lastChecked;
   Timer? _syncTimer;
   int _syncInterval = 60; // Default: check every 60 seconds
+  bool _statusOverride = false;
+  String? _meetingTitle;
+  bool _manualBusy = false;
+  DateTime? _manualBusyUntil;
+  Timer? _manualBusyTimer;
 
   @override
   void initState() {
@@ -47,6 +52,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
     // Check auth state
     _checkAuthState();
+
+    // Load override status
+    _statusOverride = widget.prefs.getBool('status_override') ?? false;
   }
 
   Future<void> _loadSavedSettings() async {
@@ -63,7 +71,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _checkAuthState() async {
-
     try {
       final success = await widget.authService.authenticate();
       setState(() {
@@ -72,7 +79,6 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       _handleAuthError(e.toString());
     }
-
   }
 
   Future<void> _authenticate() async {
@@ -167,10 +173,25 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       // Check if there's a current event
-      final hasEvent = await _calendarService.hasCurrentEvents();
+      final status = await _calendarService.getCurrentMeetingStatus();
+      final bool hasEvent = status['isInMeeting'] as bool;
+      final String? eventTitle = status['meetingTitle'] as String?;
 
-      // Update the flag color
-      if (hasEvent) {
+      // Determine status - prioritize manual busy over calendar
+      // If manual busy is active, always show as busy
+      // If status override is active, always show as available
+      // Otherwise use calendar status
+      bool effectiveStatus;
+      if (_manualBusy) {
+        effectiveStatus = true; // Manual busy takes highest priority
+      } else if (_statusOverride) {
+        effectiveStatus = false; // Override to available is second priority
+      } else {
+        effectiveStatus = hasEvent; // Calendar status is third priority
+      }
+
+      // Update the flag color based on effective status
+      if (effectiveStatus) {
         await _luxaforService.setColor(_luxaforUserId!, 'red');
       } else {
         await _luxaforService.setColor(_luxaforUserId!, 'green');
@@ -179,12 +200,24 @@ class _HomeScreenState extends State<HomeScreen> {
       // Update UI
       setState(() {
         _isInMeeting = hasEvent;
+        _meetingTitle = eventTitle;
         _lastChecked = DateTime.now();
       });
     } catch (e) {
       print('Error syncing: $e');
-      // Don't show an error dialog as this runs periodically in the background
     }
+  }
+
+  void _toggleStatusOverride() {
+    setState(() {
+      _statusOverride = !_statusOverride;
+    });
+
+    // Save the override status
+    widget.prefs.setBool('status_override', _statusOverride);
+
+    // Update the status immediately
+    _checkCalendarAndUpdateLuxafor();
   }
 
   void _showError(String title, String message) {
@@ -194,6 +227,80 @@ class _HomeScreenState extends State<HomeScreen> {
           (context) => AlertDialog(
             title: Text(title),
             content: Text(message),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text('OK'),
+              ),
+            ],
+          ),
+    );
+  }
+
+  // Add this method to set manual busy status
+  void _setManualBusyStatus(int minutes) {
+    // Clear any existing manual busy timer
+    _manualBusyTimer?.cancel();
+
+    if (minutes <= 0) {
+      // If minutes is 0 or negative, clear manual busy status
+      setState(() {
+        _manualBusy = false;
+        _manualBusyUntil = null;
+      });
+
+      // Update the light if sync is running
+      if (_isSyncRunning) {
+        _checkCalendarAndUpdateLuxafor();
+      }
+      return;
+    }
+
+    // Set manual busy status
+    final endTime = DateTime.now().add(Duration(minutes: minutes));
+
+    setState(() {
+      _manualBusy = true;
+      _manualBusyUntil = endTime;
+    });
+
+    // Set light to busy immediately if sync is running
+    if (_isSyncRunning) {
+      _luxaforService.setColor(_luxaforUserId!, 'red');
+    }
+
+    // Schedule timer to clear manual busy status
+    _manualBusyTimer = Timer(Duration(minutes: minutes), () {
+      setState(() {
+        _manualBusy = false;
+        _manualBusyUntil = null;
+      });
+
+      // Update the light if sync is running
+      if (_isSyncRunning) {
+        _checkCalendarAndUpdateLuxafor();
+      }
+    });
+  }
+
+  void _handleAuthError(String message) {
+    showDialog(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: Text('Authentication Error'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(message),
+                SizedBox(height: 16),
+                Text(
+                  'Please check that your credentials.json file is properly configured in the assets folder.',
+                  style: TextStyle(fontStyle: FontStyle.italic),
+                ),
+              ],
+            ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context),
@@ -230,7 +337,18 @@ class _HomeScreenState extends State<HomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Status card showing current state
-            StatusCard(isInMeeting: _isInMeeting, lastChecked: _lastChecked),
+            // In home_screen.dart's build method, update the StatusCard call
+            // In the build method, update the StatusCard
+            StatusCard(
+              isInMeeting: _isInMeeting,
+              meetingTitle: _meetingTitle,
+              lastChecked: _lastChecked,
+              statusOverride: _statusOverride,
+              onOverrideToggle: _toggleStatusOverride,
+              manualBusy: _manualBusy,
+              manualBusyUntil: _manualBusyUntil,
+              onSetManualBusy: _setManualBusyStatus,
+            ),
 
             SizedBox(height: 16),
 
@@ -258,34 +376,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
       ),
-    );
-  }
-
-  void _handleAuthError(String message) {
-    showDialog(
-      context: context,
-      builder:
-          (context) => AlertDialog(
-            title: Text('Authentication Error'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(message),
-                SizedBox(height: 16),
-                Text(
-                  'Please check that your credentials.json file is properly configured in the assets folder.',
-                  style: TextStyle(fontStyle: FontStyle.italic),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: Text('OK'),
-              ),
-            ],
-          ),
     );
   }
 }
