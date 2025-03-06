@@ -1,4 +1,4 @@
-Collecting workspace information# Luxafor Calendar Sync
+# Luxafor Google Calendar Sync
 
 A Flutter desktop application for macOS that syncs your Google Calendar status with your Luxafor flag. When you're in a meeting, the flag turns red. When you're free, it turns green.
 
